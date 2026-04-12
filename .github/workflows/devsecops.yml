@@ -3,8 +3,11 @@
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Number of runs'
+        default: '10'
 
 jobs:
   devsecops:
@@ -12,6 +15,10 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    strategy:
+      matrix:
+        run_id: [1,2,3,4,5,6,7,8,9,10]
+      fail-fast: false
 
     steps:
       - name: Checkout source code
@@ -90,21 +97,64 @@ jobs:
         run: |
           cosign verify-blob sbom-syft.cdx.json --bundle sbom.bundle.json --certificate-identity-regexp=".*" --certificate-oidc-issuer=https://token.actions.githubusercontent.com
 
+      - name: Count SBOM components
+        run: |
+          SYFT_COUNT=$(cat sbom-syft.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          CDXNPM_COUNT=$(cat sbom-cdxnpm.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          CDXGEN_COUNT=$(cat sbom-cdxgen.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          echo "SYFT_COUNT=$SYFT_COUNT" >> $GITHUB_ENV
+          echo "CDXNPM_COUNT=$CDXNPM_COUNT" >> $GITHUB_ENV
+          echo "CDXGEN_COUNT=$CDXGEN_COUNT" >> $GITHUB_ENV
+
+      - name: Count vulnerabilities
+        run: |
+          GRYPE_CRITICAL=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len([m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='critical']))")
+          GRYPE_HIGH=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len([m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='high']))")
+          GRYPE_TOTAL=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('matches',[])))")
+          OSV_TOTAL=$(cat osv-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(len(r.get('packages',[])) for r in d.get('results',[])))" 2>/dev/null || echo "0")
+          NPM_CRITICAL=$(cat npm-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))" 2>/dev/null || echo "0")
+          NPM_TOTAL=$(cat npm-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('total',0))" 2>/dev/null || echo "0")
+          echo "GRYPE_CRITICAL=$GRYPE_CRITICAL" >> $GITHUB_ENV
+          echo "GRYPE_HIGH=$GRYPE_HIGH" >> $GITHUB_ENV
+          echo "GRYPE_TOTAL=$GRYPE_TOTAL" >> $GITHUB_ENV
+          echo "OSV_TOTAL=$OSV_TOTAL" >> $GITHUB_ENV
+          echo "NPM_CRITICAL=$NPM_CRITICAL" >> $GITHUB_ENV
+          echo "NPM_TOTAL=$NPM_TOTAL" >> $GITHUB_ENV
+
       - name: Policy Gate
         run: |
-          CRITICAL=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); crits=[m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='critical']; print(len(crits))")
-          echo "Critical vulnerabilities: $CRITICAL"
-          echo "POLICY_GATE_RESULT=$CRITICAL" >> $GITHUB_ENV
+          echo "Critical vulnerabilities: $GRYPE_CRITICAL"
+          echo "POLICY_GATE_RESULT=$GRYPE_CRITICAL" >> $GITHUB_ENV
 
       - name: Record timing metrics
         run: |
-          echo "{\"syft_ms\": $SYFT_TIME, \"cdxnpm_ms\": $CDXNPM_TIME, \"cdxgen_ms\": $CDXGEN_TIME, \"grype_ms\": $GRYPE_TIME, \"osv_ms\": $OSV_TIME, \"npmaudit_ms\": $NPMAUDIT_TIME, \"cosign_ms\": $COSIGN_TIME, \"policy_gate_critical\": $POLICY_GATE_RESULT}" > metrics.json
-          cat metrics.json
+          echo "{
+            \"run_id\": ${{ matrix.run_id }},
+            \"project\": \"project-c-large\",
+            \"syft_ms\": $SYFT_TIME,
+            \"cdxnpm_ms\": $CDXNPM_TIME,
+            \"cdxgen_ms\": $CDXGEN_TIME,
+            \"grype_ms\": $GRYPE_TIME,
+            \"osv_ms\": $OSV_TIME,
+            \"npmaudit_ms\": $NPMAUDIT_TIME,
+            \"cosign_ms\": $COSIGN_TIME,
+            \"syft_components\": $SYFT_COUNT,
+            \"cdxnpm_components\": $CDXNPM_COUNT,
+            \"cdxgen_components\": $CDXGEN_COUNT,
+            \"grype_critical\": $GRYPE_CRITICAL,
+            \"grype_high\": $GRYPE_HIGH,
+            \"grype_total\": $GRYPE_TOTAL,
+            \"osv_total\": $OSV_TOTAL,
+            \"npm_critical\": $NPM_CRITICAL,
+            \"npm_total\": $NPM_TOTAL,
+            \"policy_gate\": $POLICY_GATE_RESULT
+          }" > metrics-run-${{ matrix.run_id }}.json
+          cat metrics-run-${{ matrix.run_id }}.json
 
-      - name: Upload all artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: devsecops-artifacts
+          name: artifacts-run-${{ matrix.run_id }}
           path: |
             sbom-syft.cdx.json
             sbom-cdxnpm.cdx.json
@@ -113,4 +163,4 @@ jobs:
             osv-results.json
             npm-audit-results.json
             sbom.bundle.json
-            metrics.json
+            metrics-run-${{ matrix.run_id }}.json
