@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      runs:
-        description: 'Number of runs'
-        default: '10'
 
 jobs:
   devsecops:
@@ -128,28 +124,120 @@ jobs:
 
       - name: Record timing metrics
         run: |
-          echo "{
-            \"run_id\": ${{ matrix.run_id }},
-            \"project\": \"project-c-large\",
-            \"syft_ms\": $SYFT_TIME,
-            \"cdxnpm_ms\": $CDXNPM_TIME,
-            \"cdxgen_ms\": $CDXGEN_TIME,
-            \"grype_ms\": $GRYPE_TIME,
-            \"osv_ms\": $OSV_TIME,
-            \"npmaudit_ms\": $NPMAUDIT_TIME,
-            \"cosign_ms\": $COSIGN_TIME,
-            \"syft_components\": $SYFT_COUNT,
-            \"cdxnpm_components\": $CDXNPM_COUNT,
-            \"cdxgen_components\": $CDXGEN_COUNT,
-            \"grype_critical\": $GRYPE_CRITICAL,
-            \"grype_high\": $GRYPE_HIGH,
-            \"grype_total\": $GRYPE_TOTAL,
-            \"osv_total\": $OSV_TOTAL,
-            \"npm_critical\": $NPM_CRITICAL,
-            \"npm_total\": $NPM_TOTAL,
-            \"policy_gate\": $POLICY_GATE_RESULT
-          }" > metrics-run-${{ matrix.run_id }}.json
-          cat metrics-run-${{ matrix.run_id }}.json
+          echo "{\"run_id\": ${{ matrix.run_id }}, \"project\": \"project-c-large\", \"syft_ms\": $SYFT_TIME, \"cdxnpm_ms\": $CDXNPM_TIME, \"cdxgen_ms\": $CDXGEN_TIME, \"grype_ms\": $GRYPE_TIME, \"osv_ms\": $OSV_TIME, \"npmaudit_ms\": $NPMAUDIT_TIME, \"cosign_ms\": $COSIGN_TIME, \"syft_components\": $SYFT_COUNT, \"cdxnpm_components\": $CDXNPM_COUNT, \"cdxgen_components\": $CDXGEN_COUNT, \"grype_critical\": $GRYPE_CRITICAL, \"grype_high\": $GRYPE_HIGH, \"grype_total\": $GRYPE_TOTAL, \"osv_total\": $OSV_TOTAL, \"npm_critical\": $NPM_CRITICAL, \"npm_total\": $NPM_TOTAL, \"policy_gate\": $POLICY_GATE_RESULT}" > metrics-run-${{ matrix.run_id }}.json
+
+      - name: Write GitHub Step Summary
+        run: |
+          echo "## 🛡️ DevSecOps Pipeline Report — Run ${{ matrix.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Project:** project-c-large | **Date:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 SBOM Generation" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Components |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Syft | $SYFT_TIME | $SYFT_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| CycloneDX-npm | $CDXNPM_TIME | $CDXNPM_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| cdxgen | $CDXGEN_TIME | $CDXGEN_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>📋 Syft SBOM 元件清單（前20筆）</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| # | 套件名稱 | 版本 | 類型 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---------|------|------|" >> $GITHUB_STEP_SUMMARY
+          cat sbom-syft.cdx.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          comps=d.get('components',[])[:20]
+          for i,c in enumerate(comps,1):
+              name=c.get('name','N/A')
+              ver=c.get('version','N/A')
+              t=c.get('type','N/A')
+              print(f'| {i} | {name} | {ver} | {t} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔍 Vulnerability Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Total | Critical | High |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|-------|----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Grype | $GRYPE_TIME | $GRYPE_TOTAL | $GRYPE_CRITICAL | $GRYPE_HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| OSV-Scanner | $OSV_TIME | $OSV_TOTAL | N/A | N/A |" >> $GITHUB_STEP_SUMMARY
+          echo "| npm audit | $NPMAUDIT_TIME | $NPM_TOTAL | $NPM_CRITICAL | N/A |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>🚨 Grype Critical 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| CVE | 套件 | 版本 | 嚴重性 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|------|--------|" >> $GITHUB_STEP_SUMMARY
+          cat grype-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          crits=[m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='critical']
+          for m in crits:
+              cve=m.get('vulnerability',{}).get('id','N/A')
+              pkg=m.get('artifact',{}).get('name','N/A')
+              ver=m.get('artifact',{}).get('version','N/A')
+              sev=m.get('vulnerability',{}).get('severity','N/A')
+              print(f'| {cve} | {pkg} | {ver} | {sev} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>⚠️ Grype High 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| CVE | 套件 | 版本 | 嚴重性 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|------|--------|" >> $GITHUB_STEP_SUMMARY
+          cat grype-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          highs=[m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='high']
+          for m in highs:
+              cve=m.get('vulnerability',{}).get('id','N/A')
+              pkg=m.get('artifact',{}).get('name','N/A')
+              ver=m.get('artifact',{}).get('version','N/A')
+              sev=m.get('vulnerability',{}).get('severity','N/A')
+              print(f'| {cve} | {pkg} | {ver} | {sev} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>📊 npm audit 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 套件 | 嚴重性 | CVE | 說明 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|-----|------|" >> $GITHUB_STEP_SUMMARY
+          cat npm-audit-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          vulns=d.get('vulnerabilities',{})
+          for pkg,info in list(vulns.items())[:20]:
+              sev=info.get('severity','N/A')
+              via=info.get('via',[])
+              cve='N/A'
+              desc='N/A'
+              if via and isinstance(via[0],dict):
+                  cve=via[0].get('url','N/A').split('/')[-1]
+                  desc=via[0].get('title','N/A')[:40]
+              print(f'| {pkg} | {sev} | {cve} | {desc} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔐 Zero Trust SBOM Signing" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Cosign | $COSIGN_TIME | ✅ Verified OK |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚦 Policy Gate" >> $GITHUB_STEP_SUMMARY
+          if [ "$GRYPE_CRITICAL" -gt "0" ]; then
+            echo "> ⚠️ **$GRYPE_CRITICAL Critical CVEs detected** (Data Collection Mode)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "> ✅ **No Critical CVEs detected**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏱️ Total Pipeline Overhead" >> $GITHUB_STEP_SUMMARY
+          echo "| SBOM Generation | Vulnerability Scan | Cosign Signing | **Total** |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------------|-------------------|----------------|-----------|" >> $GITHUB_STEP_SUMMARY
+          SBOM_TOTAL=$(( SYFT_TIME + CDXNPM_TIME + CDXGEN_TIME ))
+          SCAN_TOTAL=$(( GRYPE_TIME + OSV_TIME + NPMAUDIT_TIME ))
+          TOTAL=$(( SBOM_TOTAL + SCAN_TOTAL + COSIGN_TIME ))
+          echo "| ${SBOM_TOTAL}ms | ${SCAN_TOTAL}ms | ${COSIGN_TIME}ms | **${TOTAL}ms** |" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
