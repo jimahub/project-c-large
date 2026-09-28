@@ -1,10 +1,10 @@
-# 基準管線（Baseline）— 不含任何安全步驟（2026-09-28，對應論文 ch3 §3.9.2、§3.9.6）
+# 基準管線（Baseline）— 不含任何安全步驟（對應論文 ch3 §3.9.2、§3.9.6）
 #
 # 用途：量測 T_base,A（npm ci）與 T_base,B（checkout + npm ci）。
-# 各步驟時間由 GitHub Actions REST API（jobs 端點的 step started_at／completed_at）取得，
-# 步驟名稱須與 devsecops.yml 的 Stage 1 一致，方便以同一支分析腳本擷取。
+# 計時以步驟內毫秒時間戳為準（REST API 的步驟時間只精確到秒），寫入 metrics-baseline.json；
+# 計時方式與 devsecops.yml 的 Stage 1 完全相同。
 # 放在 project-a-small／project-b-medium／project-c-large 三個 repository 的 .github/workflows/baseline.yml，
-# 只以 workflow_dispatch 觸發，由排程腳本（generate_schedule.py 產生的排程表）逐次觸發。
+# 只以 workflow_dispatch 觸發，依排程表（generate_schedule.py）逐次執行。
 
 name: Baseline pipeline (no security steps)
 
@@ -17,13 +17,34 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Mark before checkout
+        run: echo "t_checkout_start=$(date +%s%N)" >> "$RUNNER_TEMP/marks.env"
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Mark after checkout
+        run: echo "t_checkout_end=$(date +%s%N)" >> "$RUNNER_TEMP/marks.env"
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'          # 不啟用 cache，與完整管線一致
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps   # B／C 刻意植入的 redis 3.0.2 與 typeorm 的 peer 需求衝突；與 lockfile 產生方式一致
-      - name: Record runner image
-        run: echo "ImageOS=$ImageOS ImageVersion=$ImageVersion" | tee runner-image.txt
+        run: |
+          START=$(date +%s%N)
+          npm ci --legacy-peer-deps   # 與完整管線相同
+          END=$(date +%s%N)
+          echo "t_npm_ci_ms=$(( (END-START)/1000000 ))" >> "$RUNNER_TEMP/marks.env"
+      - name: Write baseline metrics
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          m = dict(l.strip().split('=', 1) for l in open(os.path.join(os.environ['RUNNER_TEMP'], 'marks.env')) if '=' in l)
+          out = {'t_npm_ci_ms': int(m['t_npm_ci_ms']),
+                 'checkout_ms': (int(m['t_checkout_end']) - int(m['t_checkout_start'])) // 1_000_000,
+                 'image_os': os.environ.get('ImageOS'), 'image_version': os.environ.get('ImageVersion')}
+          json.dump(out, open('metrics-baseline.json', 'w'), indent=2)
+          print(out)
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline-results
+          path: metrics-baseline.json
