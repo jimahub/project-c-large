@@ -1,0 +1,29 @@
+# 基準管線（Baseline）— 不含任何安全步驟（2026-09-28，對應論文 ch3 §3.9.2、§3.9.6）
+#
+# 用途：量測 T_base,A（npm ci）與 T_base,B（checkout + npm ci）。
+# 各步驟時間由 GitHub Actions REST API（jobs 端點的 step started_at／completed_at）取得，
+# 步驟名稱須與 devsecops.yml 的 Stage 1 一致，方便以同一支分析腳本擷取。
+# 放在 project-a-small／project-b-medium／project-c-large 三個 repository 的 .github/workflows/baseline.yml，
+# 只以 workflow_dispatch 觸發，由排程腳本（generate_schedule.py 產生的排程表）逐次觸發。
+
+name: Baseline pipeline (no security steps)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'          # 不啟用 cache，與完整管線一致
+      - name: Install dependencies
+        run: npm ci
+      - name: Record runner image
+        run: echo "ImageOS=$ImageOS ImageVersion=$ImageVersion" | tee runner-image.txt

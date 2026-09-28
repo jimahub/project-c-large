@@ -1,0 +1,254 @@
+﻿name: DevSecOps Pipeline with SBOM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  devsecops:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        run_id: [1,2,3,4,5,6,7,8,9,10]
+      fail-fast: false
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate SBOM with Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          START=$(date +%s%N)
+          syft . -o cyclonedx-json=sbom-syft.cdx.json
+          END=$(date +%s%N)
+          echo "SYFT_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Generate SBOM with CycloneDX-npm
+        run: |
+          npm install -g @cyclonedx/cyclonedx-npm
+          START=$(date +%s%N)
+          cyclonedx-npm --output-format JSON --output-file sbom-cdxnpm.cdx.json
+          END=$(date +%s%N)
+          echo "CDXNPM_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Generate SBOM with cdxgen
+        run: |
+          npm install -g @cyclonedx/cdxgen
+          START=$(date +%s%N)
+          cdxgen -o sbom-cdxgen.cdx.json
+          END=$(date +%s%N)
+          echo "CDXGEN_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Scan with Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          START=$(date +%s%N)
+          grype sbom:sbom-syft.cdx.json -o json --file grype-results.json
+          END=$(date +%s%N)
+          echo "GRYPE_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Scan with OSV-Scanner
+        run: |
+          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+          START=$(date +%s%N)
+          osv-scanner --sbom=sbom-syft.cdx.json --format json > osv-results.json || true
+          END=$(date +%s%N)
+          echo "OSV_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Scan with npm audit
+        run: |
+          START=$(date +%s%N)
+          npm audit --json > npm-audit-results.json || true
+          END=$(date +%s%N)
+          echo "NPMAUDIT_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SBOM with Cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          START=$(date +%s%N)
+          cosign sign-blob sbom-syft.cdx.json --bundle sbom.bundle.json --oidc-issuer=https://token.actions.githubusercontent.com --yes
+          END=$(date +%s%N)
+          echo "COSIGN_TIME=$(( (END-START)/1000000 ))" >> $GITHUB_ENV
+
+      - name: Verify SBOM integrity
+        run: |
+          cosign verify-blob sbom-syft.cdx.json --bundle sbom.bundle.json --certificate-identity-regexp=".*" --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+
+      - name: Count SBOM components
+        run: |
+          SYFT_COUNT=$(cat sbom-syft.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          CDXNPM_COUNT=$(cat sbom-cdxnpm.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          CDXGEN_COUNT=$(cat sbom-cdxgen.cdx.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('components',[])))")
+          echo "SYFT_COUNT=$SYFT_COUNT" >> $GITHUB_ENV
+          echo "CDXNPM_COUNT=$CDXNPM_COUNT" >> $GITHUB_ENV
+          echo "CDXGEN_COUNT=$CDXGEN_COUNT" >> $GITHUB_ENV
+
+      - name: Count vulnerabilities
+        run: |
+          GRYPE_CRITICAL=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len([m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='critical']))")
+          GRYPE_HIGH=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len([m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='high']))")
+          GRYPE_TOTAL=$(cat grype-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('matches',[])))")
+          OSV_TOTAL=$(cat osv-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(len(r.get('packages',[])) for r in d.get('results',[])))" 2>/dev/null || echo "0")
+          NPM_CRITICAL=$(cat npm-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))" 2>/dev/null || echo "0")
+          NPM_TOTAL=$(cat npm-audit-results.json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('total',0))" 2>/dev/null || echo "0")
+          echo "GRYPE_CRITICAL=$GRYPE_CRITICAL" >> $GITHUB_ENV
+          echo "GRYPE_HIGH=$GRYPE_HIGH" >> $GITHUB_ENV
+          echo "GRYPE_TOTAL=$GRYPE_TOTAL" >> $GITHUB_ENV
+          echo "OSV_TOTAL=$OSV_TOTAL" >> $GITHUB_ENV
+          echo "NPM_CRITICAL=$NPM_CRITICAL" >> $GITHUB_ENV
+          echo "NPM_TOTAL=$NPM_TOTAL" >> $GITHUB_ENV
+
+      - name: Policy Gate
+        run: |
+          echo "Critical vulnerabilities: $GRYPE_CRITICAL"
+          echo "POLICY_GATE_RESULT=$GRYPE_CRITICAL" >> $GITHUB_ENV
+
+      - name: Record timing metrics
+        run: |
+          echo "{\"run_id\": ${{ matrix.run_id }}, \"project\": \"project-c-large\", \"syft_ms\": $SYFT_TIME, \"cdxnpm_ms\": $CDXNPM_TIME, \"cdxgen_ms\": $CDXGEN_TIME, \"grype_ms\": $GRYPE_TIME, \"osv_ms\": $OSV_TIME, \"npmaudit_ms\": $NPMAUDIT_TIME, \"cosign_ms\": $COSIGN_TIME, \"syft_components\": $SYFT_COUNT, \"cdxnpm_components\": $CDXNPM_COUNT, \"cdxgen_components\": $CDXGEN_COUNT, \"grype_critical\": $GRYPE_CRITICAL, \"grype_high\": $GRYPE_HIGH, \"grype_total\": $GRYPE_TOTAL, \"osv_total\": $OSV_TOTAL, \"npm_critical\": $NPM_CRITICAL, \"npm_total\": $NPM_TOTAL, \"policy_gate\": $POLICY_GATE_RESULT}" > metrics-run-${{ matrix.run_id }}.json
+
+      - name: Write GitHub Step Summary
+        run: |
+          echo "## 🛡️ DevSecOps Pipeline Report — Run ${{ matrix.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Project:** project-c-large | **Date:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 SBOM Generation" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Components |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Syft | $SYFT_TIME | $SYFT_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| CycloneDX-npm | $CDXNPM_TIME | $CDXNPM_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| cdxgen | $CDXGEN_TIME | $CDXGEN_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>📋 Syft SBOM 元件清單（前20筆）</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| # | 套件名稱 | 版本 | 類型 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---------|------|------|" >> $GITHUB_STEP_SUMMARY
+          cat sbom-syft.cdx.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          comps=d.get('components',[])[:20]
+          for i,c in enumerate(comps,1):
+              name=c.get('name','N/A')
+              ver=c.get('version','N/A')
+              t=c.get('type','N/A')
+              print(f'| {i} | {name} | {ver} | {t} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔍 Vulnerability Scanning" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Total | Critical | High |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|-------|----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Grype | $GRYPE_TIME | $GRYPE_TOTAL | $GRYPE_CRITICAL | $GRYPE_HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| OSV-Scanner | $OSV_TIME | $OSV_TOTAL | N/A | N/A |" >> $GITHUB_STEP_SUMMARY
+          echo "| npm audit | $NPMAUDIT_TIME | $NPM_TOTAL | $NPM_CRITICAL | N/A |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>🚨 Grype Critical 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| CVE | 套件 | 版本 | 嚴重性 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|------|--------|" >> $GITHUB_STEP_SUMMARY
+          cat grype-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          crits=[m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='critical']
+          for m in crits:
+              cve=m.get('vulnerability',{}).get('id','N/A')
+              pkg=m.get('artifact',{}).get('name','N/A')
+              ver=m.get('artifact',{}).get('version','N/A')
+              sev=m.get('vulnerability',{}).get('severity','N/A')
+              print(f'| {cve} | {pkg} | {ver} | {sev} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>⚠️ Grype High 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| CVE | 套件 | 版本 | 嚴重性 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|------|--------|" >> $GITHUB_STEP_SUMMARY
+          cat grype-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          highs=[m for m in d.get('matches',[]) if m.get('vulnerability',{}).get('severity','').lower()=='high']
+          for m in highs:
+              cve=m.get('vulnerability',{}).get('id','N/A')
+              pkg=m.get('artifact',{}).get('name','N/A')
+              ver=m.get('artifact',{}).get('version','N/A')
+              sev=m.get('vulnerability',{}).get('severity','N/A')
+              print(f'| {cve} | {pkg} | {ver} | {sev} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>📊 npm audit 漏洞明細</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 套件 | 嚴重性 | CVE | 說明 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|-----|------|" >> $GITHUB_STEP_SUMMARY
+          cat npm-audit-results.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          vulns=d.get('vulnerabilities',{})
+          for pkg,info in list(vulns.items())[:20]:
+              sev=info.get('severity','N/A')
+              via=info.get('via',[])
+              cve='N/A'
+              desc='N/A'
+              if via and isinstance(via[0],dict):
+                  cve=via[0].get('url','N/A').split('/')[-1]
+                  desc=via[0].get('title','N/A')[:40]
+              print(f'| {pkg} | {sev} | {cve} | {desc} |')
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔐 Zero Trust SBOM Signing" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Time (ms) | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Cosign | $COSIGN_TIME | ✅ Verified OK |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚦 Policy Gate" >> $GITHUB_STEP_SUMMARY
+          if [ "$GRYPE_CRITICAL" -gt "0" ]; then
+            echo "> ⚠️ **$GRYPE_CRITICAL Critical CVEs detected** (Data Collection Mode)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "> ✅ **No Critical CVEs detected**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏱️ Total Pipeline Overhead" >> $GITHUB_STEP_SUMMARY
+          echo "| SBOM Generation | Vulnerability Scan | Cosign Signing | **Total** |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------------|-------------------|----------------|-----------|" >> $GITHUB_STEP_SUMMARY
+          SBOM_TOTAL=$(( SYFT_TIME + CDXNPM_TIME + CDXGEN_TIME ))
+          SCAN_TOTAL=$(( GRYPE_TIME + OSV_TIME + NPMAUDIT_TIME ))
+          TOTAL=$(( SBOM_TOTAL + SCAN_TOTAL + COSIGN_TIME ))
+          echo "| ${SBOM_TOTAL}ms | ${SCAN_TOTAL}ms | ${COSIGN_TIME}ms | **${TOTAL}ms** |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-run-${{ matrix.run_id }}
+          path: |
+            sbom-syft.cdx.json
+            sbom-cdxnpm.cdx.json
+            sbom-cdxgen.cdx.json
+            grype-results.json
+            osv-results.json
+            npm-audit-results.json
+            sbom.bundle.json
+            metrics-run-${{ matrix.run_id }}.json
