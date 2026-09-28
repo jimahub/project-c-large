@@ -24,6 +24,6 @@ jobs:
         with:
           node-version: '20'          # 不啟用 cache，與完整管線一致
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps   # B／C 刻意植入的 redis 3.0.2 與 typeorm 的 peer 需求衝突；與 lockfile 產生方式一致
       - name: Record runner image
         run: echo "ImageOS=$ImageOS ImageVersion=$ImageVersion" | tee runner-image.txt
