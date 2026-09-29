@@ -1,4 +1,4 @@
-# 基準管線（Baseline）— 不含任何安全步驟（對應論文 ch3 §3.9.2、§3.9.6）
+# 基準管線（Baseline）— 不含任何安全步驟（對應論文 ch3 §3.9.3、§3.9.7）
 #
 # 用途：量測 T_base,A（npm ci）與 T_base,B（checkout + npm ci）。
 # 計時以步驟內毫秒時間戳為準（REST API 的步驟時間只精確到秒），寫入 metrics-baseline.json；
